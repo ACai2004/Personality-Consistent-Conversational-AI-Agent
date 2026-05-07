@@ -1,0 +1,6 @@
+data/rag/chroma_db/
+data/memory/
+data/wechat_config.json
+__pycache__/
+*.pyc
+.DS_Store
