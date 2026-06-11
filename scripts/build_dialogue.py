@@ -3,7 +3,7 @@ import os
 import random
 import re
 
-BASE_DIR = "D:/VScodeProjects/Mark-Agent"
+BASE_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 INPUT_FILE = os.path.join(BASE_DIR, "data", "cleaned", "mark_cleaned_v3.txt")
 OUTPUT_DIR = os.path.join(BASE_DIR, "data", "dialogue")
 OUTPUT_FILE = os.path.join(OUTPUT_DIR, "mark_dialogue_v2.jsonl")

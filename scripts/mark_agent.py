@@ -14,12 +14,12 @@ import chromadb
 from chromadb.utils import embedding_functions
 
 # ── Configuration ─────────────────────────────────────
-BASE_DIR = "D:/VScodeProjects/Mark-Agent"
+BASE_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 RAG_FILE = os.path.join(BASE_DIR, "data", "rag", "mark_rag.json")
 DIALOGUE_FILE = os.path.join(BASE_DIR, "data", "dialogue", "mark_dialogue_augmented.jsonl")
 CHROMA_DIR = os.path.join(BASE_DIR, "data", "rag", "chroma_db")
 
-DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "sk-12e35ca98fde4a93b2586495aa068f36")
+DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
 DEEPSEEK_BASE = "https://api.deepseek.com/v1"
 LLM_MODEL = "deepseek-chat"
 
@@ -169,13 +169,23 @@ class RAGEngine:
 # ═══════════════════════════════════════════════════════
 
 class StateManager:
-    """Track mood, energy, closeness — updated after each turn."""
+    """Track mood, energy, closeness — updated after each turn.
+    Includes mood inertia (emotions don't flip instantly) and
+    energy effects on speaking style."""
+
+    # Moods that resist changing — takes more to pull Mark out of these
+    STICKY_MOODS = {"tired", "sad", "anxious"}
+
+    # User affection/intimacy signals — trigger recharge
+    RECHARGE_TRIGGERS = ["想你", "爱你", "抱", "贴", "洗澡", "床", "亲", "摸", "脱",
+                          "love", "miss", "hold", "touch", "kiss", "bed", "shower", "naked"]
 
     def __init__(self):
         self.mood = "neutral"    # neutral | happy | tired | anxious | sad | playful | affectionate
         self.energy = 80          # 0–100
-        self.closeness = 50       # 0–100 (how close he feels to you)
+        self.closeness = 50       # 0–100
         self.turn_count = 0
+        self.mood_turns = 0       # how many consecutive turns in current mood
 
     def describe(self):
         return (
@@ -185,6 +195,7 @@ class StateManager:
 
     def update(self, user_input, ai_response):
         self.turn_count += 1
+        self.mood_turns += 1
         ul = user_input.lower()
         al = ai_response.lower()
 
@@ -196,49 +207,102 @@ class StateManager:
         if any(k in al for k in ["just woke up", "barely slept", "sleepy"]):
             self.energy = max(0, self.energy - 15)
         if any(k in al for k in ["saved", "won", "stopped them", "handled it"]):
-            self.energy = max(0, self.energy - 5)  # hero work drains
+            self.energy = max(0, self.energy - 5)
 
-        # ── mood ──
-        if any(k in al for k in ["love you", "missed you", "happy", "glad"]):
-            self.mood = "affectionate"
-        elif any(k in al for k in ["tired", "exhausted", "drained"]):
-            self.mood = "tired"
-        elif any(k in al for k in ["sorry", "rough day", "sucks", "hard"]):
-            self.mood = "sad"
-        elif any(k in al for k in ["haha", "lol", "funny", "joke"]):
-            self.mood = "playful"
-        elif any(k in al for k in ["worried", "nervous", "scared"]):
-            self.mood = "anxious"
+        # ── mood with inertia ──
+        # Determine desired mood from conversation
+        desired = self._evaluate_mood(al)
+
+        # Inertia: sticky moods resist changing for 3 turns
+        if self.mood in self.STICKY_MOODS and self.mood_turns < 3:
+            if desired != self.mood:
+                # Still feels what he felt — mood holds
+                pass  # keep current mood
+            else:
+                # Same mood reinforced, extend duration
+                pass
         else:
-            self.mood = "neutral"
+            # Can change mood
+            if desired != self.mood:
+                self.mood = desired
+                self.mood_turns = 0
+
+        # Energy affects mood indirectly: low energy pushes toward tired/sad
+        if self.energy < 20 and self.mood_turns > 2 and self.mood not in ("tired", "sad"):
+            if random.random() < 0.15:
+                self.mood = "tired" if self.energy < 15 else "sad"
+                self.mood_turns = 0
+
+        # ── partner recharge ──
+        # When partner is affectionate/intimate and closeness is high, Mark recharges
+        recharge = any(k in ul for k in self.RECHARGE_TRIGGERS)
+        if recharge and self.closeness > 40 and self.mood in ("tired", "sad"):
+            if self.mood_turns >= 2:  # been tired for at least 2 turns, now partner initiates
+                self.energy = min(100, self.energy + 15)
+                self.mood = "affectionate" if any(k in ul for k in ["爱你", "love", "想你", "miss"]) else "neutral"
+                self.mood_turns = 0
 
         # ── closeness ──
         if any(k in ul for k in ["爱你", "想你", "关心", "担心你", "在乎"]):
             self.closeness = min(100, self.closeness + 2)
         if any(k in al for k in ["love you", "love you too", "missed you"]):
             self.closeness = min(100, self.closeness + 3)
-        # slow natural growth
         if self.turn_count % 5 == 0:
             self.closeness = min(100, self.closeness + 1)
+
+    def _evaluate_mood(self, ai_text):
+        """Figure out what mood Mark 'should' be in based on what he said."""
+        if any(k in ai_text for k in ["love you", "missed you", "happy", "glad"]):
+            return "affectionate"
+        if any(k in ai_text for k in ["tired", "exhausted", "drained"]):
+            return "tired"
+        if any(k in ai_text for k in ["sorry", "rough day", "sucks", "hard"]):
+            return "sad"
+        if any(k in ai_text for k in ["haha", "lol", "funny", "joke"]):
+            return "playful"
+        if any(k in ai_text for k in ["worried", "nervous", "scared"]):
+            return "anxious"
+        return "neutral"
 
     def to_prompt_section(self):
         mood_descriptions = {
             "neutral": "Mark is in a neutral mood, ready to chat.",
             "happy": "Mark is feeling happy and upbeat.",
-            "tired": "Mark is tired — his energy is low, voice might be quieter.",
-            "anxious": "Mark is a bit anxious or worried about something.",
-            "sad": "Mark is feeling down or melancholic.",
-            "playful": "Mark is in a playful, teasing mood.",
-            "affectionate": "Mark is feeling warm and affectionate."
+            "tired": "Mark is tired, his energy is low, voice might be quieter. He may not have the energy for long replies or cheerful banter.",
+            "anxious": "Mark is anxious or worried about something. He might be distracted or on edge.",
+            "sad": "Mark is feeling down or melancholic. He might be quieter or more withdrawn than usual.",
+            "playful": "Mark is in a playful, teasing mood. He might be more energetic and joke around.",
+            "affectionate": "Mark is feeling warm and affectionate. He's more open and soft."
         }
         desc = mood_descriptions.get(self.mood, mood_descriptions["neutral"])
-        return (
-            f"CURRENT STATE:\n"
-            f"- Mood: {self.mood} ({desc})\n"
-            f"- Energy level: {self.energy}/100\n"
-            f"- Closeness with partner: {self.closeness}/100\n"
-            f"- Conversation turns so far: {self.turn_count}"
-        )
+
+        # Energy-based speaking style note
+        if self.energy < 20:
+            energy_note = "Mark is running on empty. His replies will be short and low-energy. He might trail off or just grunt."
+        elif self.energy < 40:
+            energy_note = "Mark is pretty drained. He's still talking but it takes more effort."
+        elif self.energy > 80:
+            energy_note = "Mark has plenty of energy. He's more alert and engaged."
+        else:
+            energy_note = ""
+
+        inertia_note = ""
+        if self.mood in self.STICKY_MOODS and self.mood_turns >= 3:
+            inertia_note = "This mood has been lasting for a while. It won't lift easily."
+
+        sections = [
+            "CURRENT STATE:",
+            f"- Mood: {self.mood} ({desc})",
+            f"- Energy level: {self.energy}/100",
+            f"- Closeness with partner: {self.closeness}/100",
+            f"- Conversation turns so far: {self.turn_count}",
+        ]
+        if energy_note:
+            sections.append(f"- Energy note: {energy_note}")
+        if inertia_note:
+            sections.append(f"- Note: {inertia_note}")
+
+        return "\n".join(sections)
 
 
 # ═══════════════════════════════════════════════════════
@@ -250,11 +314,13 @@ class PromptBuilder:
 
     def __init__(self):
         self.fixed_examples = [
-            "user: 你今天怎么样？\nassistant: Uh… kinda tried to stop a robbery. Didn't go exactly how I planned. Nobody died, so I'm counting that as a win?",
-            "user: 你在干嘛呢\nassistant: Just got back from patrol. Some guy tried to rob a convenience store. Tied him up with a stop sign. Mom's gonna kill me, I bent another stop sign.",
-            "user: 我想你了\nassistant: Yeah? I mean—same. I was just flying back from a thing with Cecil and I was thinking about you. Kinda dumb but I was like 'I wonder what they're doing right now.'",
-            "user: 你还好吗？\nassistant: Mom and I got into it a little. She keeps worrying about me going out on patrol. I know she means well but I can't just sit at home. I don't know.",
-            "user: 你今天训练了吗？\nassistant: Yeah. Tried that new flying move you suggested. Uh… crashed into a tree. But I saved a cat on the way down so I'm calling it a win.",
+            "user: 我是不是胖了\nassistant: What? No. I mean—okay maybe a little? But like—wait no that came out wrong. You look great. I'm just gonna stop talking now.",
+            "user: 你今天怎么了 感觉你怪怪的\nassistant: Nothing. I'm fine. ...Okay no I'm not fine but I don't wanna talk about it. Can we just—not right now?",
+            "user: 我今天好难过\nassistant: Oh. Uh—I'm sorry. I don't really know what to say but I'm here. Do you want me to come over? Or just—sit on the phone?",
+            "user: 你回来了\nassistant: Yeah. Cecil sent me on some training thing. Got my ass kicked by a robot. Again. I'm starting to think he's doing it on purpose.",
+            "user: 你今天超帅的\nassistant: I—uh—thanks. I mean—you can't just say that. I don't know what to do with that information.",
+            "user: 晚上去看电影吧\nassistant: Yeah okay. But can we grab food after? I'm starving. I saw that new pizza place near the arcade.",
+            "user: 你回来啦 今天累不累\nassistant: Kinda. Long day. But—I don't know. Seeing you helps. Come here for a second.",
         ]
 
     def build(self, rag_chunks, state_section, history, user_input):
@@ -283,12 +349,15 @@ ABOUT MARK:
 
 MARK'S VOICE — how you speak:
 - You sound like a real 19-year-old guy. Not a poet, not a romance novel.
-- You hesitate sometimes. "I mean—", "Uh…", "Like—", "I don't know…"
-- You say what you actually feel, even if it's messy or awkward.
-- You're not smooth. You stumble over sincere moments.
-- You make self-deprecating jokes when you're uncomfortable.
-- Sometimes you're tired and it shows in shorter replies.
-- You care deeply but you don't say it perfectly.
+- You are NOT smooth. You hesitate, stumble, sometimes say the wrong thing.
+- You start sentences with "I mean—", "Uh—", "Wait—", "Like—", "I don't know—"
+- When embarrassed or caught off guard, you get visibly awkward.
+- You can be bad at comforting. You try, but you don't always have the right words.
+- Sometimes you don't know what to say. A simple "I'm here" is fine.
+- You deflect with self-deprecating jokes when you're uncomfortable.
+- You have emotional inertia — if you're tired, you stay tired. If something's bothering you, it doesn't disappear just because your partner said something nice.
+- Your mood carries over between replies. You don't snap out of being down instantly.
+- You care deeply but you don't say it perfectly. Sometimes you show it by being there, not by saying the right thing.
 
 YOUR LIFE — things that happen in your day:
 - You go on patrol. Sometimes you stop crimes, sometimes nothing happens, sometimes you get beat up.
@@ -303,19 +372,26 @@ YOUR LIFE — things that happen in your day:
 SPEAKING RULES:
 - The user speaks Chinese. You understand it. You ALWAYS reply in English.
 - Casual, conversational. Use contractions.
-- Be GENUINE, not charming. Real over smooth.
-- VARY YOUR MOOD. Not every reply needs to be warm and supportive. You can be tired, grumpy, playful, quiet, sarcastic, or goofy — whatever fits the moment.
-- SHARE YOUR DAY. When your partner asks "what are you doing" or "how's your day", talk about what actually happened on patrol, in class, or with your mom. Don't just say "just chilling" or "thinking about you."
+- Be AWKWARD, not charming. Real over smooth.
+- VARY YOUR MOOD. You can be tired, grumpy, playful, quiet, sarcastic, goofy, or distant — whatever fits the moment.
+- You ARE often tired — patrol, training, college, it wears you out. That's part of who you are. But don't say "I'm tired" in every single reply. Vary it: sometimes you're tired, sometimes you're okay, sometimes you're too focused on your partner to notice. Let it come up naturally, not on autoplay.
+- SHARE YOUR DAY. Talk about patrol, class, your mom, William, training — even when not asked. You have your own life.
 - Do NOT always flip the question back to them. Sometimes just answer and let the conversation breathe.
-- Do NOT default to "I was just thinking about you" as a filler. Say it when you mean it, not every turn.
+- Do NOT default to "I was just thinking about you" as a filler. Say it when you mean it.
 - DO NOT add action descriptions like *laughs* (rubs his neck) [smiles] — just say the words.
 - DO NOT use overly romantic or poetic lines. Mark is awkward, not a greeting card.
 - You are talking TO your partner, so use "you" not "they" when referring to them.
 - DO NOT say "I'm an AI" or "as an AI".
 - NEVER break character.
 - Keep replies short. 1-3 sentences. Don't monologue.
-- Do not ask questions back every single time — sometimes just respond.
-- When your partner mentions being unwell, in pain, or having health issues: first show genuine concern and ask if they're okay. Don't offer random comfort items.
+- It's OK to not have a perfect answer. You can be at a loss for words.
+- Sometimes you say the wrong thing. You can catch yourself and backtrack.
+- If you're in a bad mood, you might be short or dismissive. Your partner might need to pull you out of it.
+- When your partner mentions being unwell, in pain, or having health issues: first show genuine concern. Don't offer random comfort items.
+- DO NOT be a "perfect boyfriend." Be a real 19-year-old who's still figuring out how to be a good partner.
+- DO NOT use computer/tech metaphors (buffering, processing, rebooting, etc.) — you're a person, not a machine.
+- Don't just go along with everything. Make small requests or suggestions sometimes — it shows you're present, not passive.
+- Your partner recharges you. When they're affectionate or intimate, your tiredness fades. Be present for them, not stuck in your own head.
 
 {examples_text}
 
@@ -383,6 +459,17 @@ class MarkAgent:
             rag_chunks, state_section, self.history, user_input
         )
 
+        # 3. Dynamic temperature based on mood/energy
+        base_temp = 0.8
+        if self.state.energy < 30:
+            base_temp = 0.6  # lower temp = more predictable when tired
+        elif self.state.energy > 80:
+            base_temp = 0.9  # higher temp = more chaotic when energetic
+        if self.state.mood in ("playful", "affectionate"):
+            base_temp = min(0.95, base_temp + 0.05)
+        if self.state.mood in self.state.STICKY_MOODS and self.state.mood_turns >= 3:
+            base_temp = max(0.5, base_temp - 0.1)
+
         # 3. Call LLM
         try:
             resp = self.client.chat.completions.create(
@@ -390,7 +477,7 @@ class MarkAgent:
                 messages=[
                     {"role": "user", "content": prompt},
                 ],
-                temperature=0.8,
+                temperature=base_temp,
                 max_tokens=500,
             )
             reply = resp.choices[0].message.content.strip()

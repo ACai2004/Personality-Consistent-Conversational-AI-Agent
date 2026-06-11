@@ -15,10 +15,10 @@ import time
 from openai import OpenAI
 
 # ── Config ──────────────────────────────────────────────
-BASE_DIR = "D:/VScodeProjects/Mark-Agent"
+BASE_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 OUTPUT_FILE = os.path.join(BASE_DIR, "data", "dialogue", "mark_multi_turn.jsonl")
 
-API_KEY = os.getenv("DEEPSEEK_API_KEY", "sk-12e35ca98fde4a93b2586495aa068f36")
+API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
 API_BASE = "https://api.deepseek.com/v1"
 MODEL = "deepseek-chat"
 
